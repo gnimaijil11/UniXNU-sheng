@@ -154,7 +154,7 @@ jobs:
           echo "candidates: ${files[*]}"
           for f in "${files[@]}"; do
             sed -i '' 's/"sparse-checkout", "add", \*source\["paths"\]/"sparse-checkout", "add", *paths/' "$f"
-            grep -n 'sparse-checkout' "$f"
+            grep -n 'sparse-checkout' "$f" || echo "  (no sparse-checkout line in $f)"
           done
 
       - name: fetch the driver sources
