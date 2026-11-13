@@ -133,6 +133,18 @@ jobs:
           echo "::add-mask::${account#*:}"
           sudo -E bash -c "$cmd --skip-setup --user '$account'"
 
+      - name: stage the WCN7850 firmware
+        run: |
+          # firmware/wcn7850 is gitignored: maintainers keep it locally. The blobs are the
+          # ones proprietary-files.txt fetches; the manifest is generated from them.
+          mkdir -p device/firmware/wcn7850
+          base=https://raw.githubusercontent.com/ianchb/sheng-firmware/master/ath12k/WCN7850/hw2.0
+          for f in amss.bin m3.bin board-2.bin; do
+            curl -fSL --retry 3 -o "device/firmware/wcn7850/$f" "$base/$f"
+          done
+          python3 -c "import hashlib,json,pathlib; d=pathlib.Path('device/firmware/wcn7850'); files={n:{'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()} for n in ('amss.bin','m3.bin','board-2.bin') for b in [(d/n).read_bytes()]}; (d/'manifest.json').write_text(json.dumps({'files':files},indent=2)+chr(10)); print(json.dumps(files,indent=2))"
+          ls -l device/firmware/wcn7850
+
       - name: release (kernel, package, payload, firmware, boot.img)
         working-directory: device
         env:
