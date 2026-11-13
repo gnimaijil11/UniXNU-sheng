@@ -145,6 +145,18 @@ jobs:
           python3 -c "import hashlib,json,pathlib; d=pathlib.Path('device/firmware/wcn7850'); files={n:{'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()} for n in ('amss.bin','m3.bin','board-2.bin') for b in [(d/n).read_bytes()]}; (d/'manifest.json').write_text(json.dumps({'files':files},indent=2)+chr(10)); print(json.dumps(files,indent=2))"
           ls -l device/firmware/wcn7850
 
+      - name: patch the driver fetch scripts
+        run: |
+          # drivers/*/tools/fetch-sources.py calls `git sparse-checkout add` with the
+          # leading-slash paths from source-lock.json; git 2.5x rejects those.
+          shopt -s nullglob
+          files=(device/drivers/*/tools/fetch-sources.py)
+          echo "candidates: ${files[*]}"
+          for f in "${files[@]}"; do
+            sed -i '' 's/"sparse-checkout", "add", \*source\["paths"\]/"sparse-checkout", "add", *paths/' "$f"
+            grep -n 'sparse-checkout' "$f"
+          done
+
       - name: fetch the driver sources
         run: |
           # drivers/*/deps are not committed; each submodule carries tools/fetch-sources.sh
