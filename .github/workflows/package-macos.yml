@@ -112,43 +112,33 @@ jobs:
         run: |
           set -euo pipefail
           brew install openssl@3 >/dev/null 2>&1 || true
-          mkdir -p build/raw
-          # 1. Extract the three macOS windows (OS, SystemOS cryptex, App cryptex) from the IPSW.
-          OS_DMG=$(python3 ../UniXNU/unixnu ipsw fetch OS --os macos-27 -D .)
-          SYS_DMG=$(python3 ../UniXNU/unixnu ipsw fetch "Cryptex1,SystemOS" --os macos-27 -D .)
-          APP_DMG=$(python3 ../UniXNU/unixnu ipsw fetch "Cryptex1,AppOS" --os macos-27 -D .)
-          echo "OS:       $OS_DMG"
-          echo "SystemOS: $SYS_DMG"
-          echo "App:      $APP_DMG"
-          # 2. Read each disk image's raw bytes (attach read-only, no mount) into a plain file,
-          #    exactly the size hdiutil reports -- the SHA-256 must equal the profile's [root] digest.
-          raw_extract() {
-            python3 - "$1" "$2" <<'PY'
-          import plistlib, re, subprocess, sys
-          dmg, out = sys.argv[1], sys.argv[2]
-          info = plistlib.loads(subprocess.check_output(['hdiutil', 'imageinfo', '-plist', dmg]))
-          size = info['Size Information']['Total Bytes']
-          at = subprocess.check_output(
-              ['hdiutil', 'attach', '-nomount', '-readonly', '-noverify', '-noautofsck', dmg], text=True)
-          dev = re.search(r'(/dev/disk\d+)\s', at).group(1)
-          raw = dev.replace('/dev/disk', '/dev/rdisk')
-          try:
-              with open(raw, 'rb', buffering=0) as src, open(out, 'wb') as dst:
-                  remaining = size
-                  while remaining:
-                      chunk = src.read(min(8 * 1024 * 1024, remaining))
-                      if not chunk:
-                          raise SystemExit('short read from ' + raw)
-                      dst.write(chunk)
-                      remaining -= len(chunk)
-          finally:
-              subprocess.run(['hdiutil', 'detach', dev], capture_output=True)
-          print(f'{out}: {size} bytes')
+          mkdir -p build
+          # 1. Decrypt and extract the three macOS windows (OS, SystemOS cryptex, App cryptex)
+          #    as raw disk images, exactly as `unixnu build userdata` does internally:
+          #    Ipsw.disk_image() decrypts the AEA member (the CLI `ipsw fetch` only extracts,
+          #    it does NOT decrypt), then userdata.image_size()/disk_blocks() read the raw bytes.
+          python3 - <<'PY'
+          import pathlib, sys
+          sys.path.insert(0, '../UniXNU/scripts')
+          from unixnu.cli import parser
+          from unixnu.config import Context
+          from unixnu.ipsw import Ipsw
+          from unixnu.userdata import image_size, disk_blocks
+
+          ctx = Context(parser().parse_args(['build', 'userdata', '--os', 'macos-27', '-D', '.']))
+          source = Ipsw(ctx)
+          for name, component in (('OS', 'OS'),
+                                  ('SystemOS', 'Cryptex1,SystemOS'),
+                                  ('App', 'Cryptex1,AppOS')):
+              dmg = source.disk_image(component)
+              size = image_size(dmg)
+              out = pathlib.Path(f'build/raw-{name}.img')
+              with out.open('wb') as fh:
+                  for data in disk_blocks(dmg, size):
+                      fh.write(data)
+              print(f'{name}: {dmg} -> {out} ({size} bytes)')
           PY
-          }
-          raw_extract "$OS_DMG"  build/raw-OS.img
-          raw_extract "$SYS_DMG" build/raw-SystemOS.img
-          raw_extract "$APP_DMG" build/raw-App.img
+          ls -l build/raw-OS.img build/raw-SystemOS.img build/raw-App.img
           # 3. Sign every window with one owner key: writes scripts/policies/<profile>/{OS,SystemOS,App}/
           #    {manifest.header.bin,trusted-key.bin,verification.json} and the hash tables
           #    ../UniXNU/build/verified-root-*/hashes.bin that become the userdata *.vroot objects.
