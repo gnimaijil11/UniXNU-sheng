@@ -91,6 +91,13 @@ jobs:
           UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
         run: scripts/package.sh --os macos-27 --check --uefi ../uefi-sheng
 
+      - name: raise the Adreno Metal bridge build timeout
+        run: |
+          files="$(grep -rl 'timeout=1800' UniXNU/out 2>/dev/null || true)"
+          echo "patching: $files"
+          for f in $files; do sed -i '' 's/timeout=1800/timeout=10800/' "$f"; done
+          grep -rn 'timeout=10800' UniXNU/out | head -3
+
       - name: userdata root image (macos-27)
         working-directory: device
         env:
