@@ -1,0 +1,197 @@
+name: package-macos
+
+# macOS 27.3 (26C5035r) profile for Xiaomi Pad 6S Pro (sheng), built on a GitHub
+# macOS runner because the profile needs Xcode, hdiutil/diskutil and a root-made
+# Data seed (make-macos-data-seed.py --skip-setup; NOT --init-data, which is iPadOS 27 only).
+# Derived from .github/workflows/package.yml (iPadOS 17/26/27).
+#
+# Secrets:
+#   UNIXNU_UNIQUE_CHIP_ID  8 hex digits, the platform seed baked into the images
+#   TS_AUTHKEY             headscale preauthkey (ephemeral, short expiry recommended)
+#   RUNNER_SSH_KEY         private key allowed on the transfer host
+#   MACOS_SEED_USER        optional, "name:password" for the macOS admin account
+#
+# Artifacts: images (boot.img, payload.img, kernel.macho, manifest) + data seed.
+# The 16 GiB userdata image is shipped over the tailnet to the transfer host
+# (split + gzip) and is NOT uploaded as an artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seed_user:
+        description: "Data seed admin account, name:password (blank = secret MACOS_SEED_USER or unixnu:unixnu)"
+        type: string
+        default: ""
+      transfer:
+        description: "Copy the userdata image to the tailnet host after the build"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TRANSFER_HOST: gnima@100.64.0.4
+  TRANSFER_DIR: C:/Users/gnima/unixnu-images
+
+jobs:
+  package:
+    runs-on: macos-26
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: device
+          submodules: recursive
+      - uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          ref: 82b847c4ac3f68a57024b3082ffa3a03442defd9
+          path: UniXNU
+          submodules: recursive
+      - uses: actions/checkout@v4
+        with:
+          repository: UniXNU/uefi-sheng
+          path: uefi-sheng
+          submodules: recursive
+
+      - name: tools
+        run: |
+          brew install dtc llvm lld cmake mtools ninja glslang shaderc spirv-tools bison pkgconf rustup blacktop/tap/ipsw
+          {
+            echo "$HOME/.cargo/bin"
+            echo "/opt/homebrew/opt/llvm/bin"
+            echo "/opt/homebrew/opt/lld/bin"
+            echo "/opt/homebrew/opt/bison/bin"
+          } >> "$GITHUB_PATH"
+          rustup toolchain install 1.98.0 --profile minimal --component rust-src
+          ok=1
+          for t in clang xcodebuild make git ninja cmake dtc fdtget fdtput aea compression_tool \
+                   hdiutil diskutil ditto mformat mcopy ipsw; do
+            command -v "$t" >/dev/null || { echo "missing tool: $t"; ok=0; }
+          done
+          [ "$ok" = 1 ]
+
+      - name: platform seed
+        env:
+          seed: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+        run: |
+          if ! [[ "$seed" =~ ^[0-9a-fA-F]{8}$ ]]; then
+            echo 'Set the repository secret UNIXNU_UNIQUE_CHIP_ID: 8 hex digits.' >&2
+            exit 1
+          fi
+
+      - name: deps, preflight and patches (macos-27)
+        working-directory: device
+        env:
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+        run: scripts/package.sh --os macos-27 --check --uefi ../uefi-sheng
+
+      - name: userdata root image (macos-27)
+        working-directory: device
+        env:
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+        run: |
+          python3 ../UniXNU/unixnu build userdata --os macos-27 -D . --dry-run
+          python3 ../UniXNU/unixnu build userdata --os macos-27 -D .
+
+      - name: data seed (root, skip-setup)
+        working-directory: device
+        env:
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+          SEED_USER: ${{ inputs.seed_user }}
+        run: |
+          set -o pipefail
+          python3 ../UniXNU/unixnu build kernel payload --os macos-27 -D . 2>&1 | tee /tmp/seedcmd.log || true
+          cmd="$(tr '\n' ' ' < /tmp/seedcmd.log | grep -o 'python3 scripts/make-macos-data-seed\.py .*--gib [0-9]*' | head -1)"
+          if [ -z "$cmd" ]; then
+            echo '::error::no make-macos-data-seed.py command was printed; showing the tail of the log'
+            tail -40 /tmp/seedcmd.log
+            exit 1
+          fi
+          account="${SEED_USER:-${{ secrets.MACOS_SEED_USER }}}"
+          account="${account:-unixnu:unixnu}"
+          echo "::add-mask::${account#*:}"
+          cd ../UniXNU
+          sudo -E bash -c "$cmd --skip-setup --user '$account'"
+
+      - name: release (kernel, package, payload, firmware, boot.img)
+        working-directory: device
+        env:
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+        run: |
+          seed="$(ls "$(pwd)/../UniXNU"/out/sheng/macos-*/*/runtime/data.dbr | head -1)"
+          echo "seed: $seed"
+          scripts/package.sh --os macos-27 --no-deps --uefi ../uefi-sheng --data-ramdisk "$seed"
+
+      - name: pack userdata for transfer
+        run: |
+          img="$(ls UniXNU/out/sheng/macos-*/*/userdata/userdata-root.img | head -1)"
+          ls -l "$img"
+          mkdir -p ship
+          gzip -1 -c "$img" | split -b 1900m - ship/userdata-root.img.gz.part
+          cp "$(dirname "$img")/userdata-root.json" ship/ 2>/dev/null || true
+          cp UniXNU/out/sheng/macos-*/*/boot/boot.img ship/ 2>/dev/null || true
+          cp UniXNU/out/sheng/macos-*/*/payload/payload.img ship/ 2>/dev/null || true
+          cp UniXNU/out/sheng/macos-*/*/kernel/kernel.macho ship/ 2>/dev/null || true
+          cp UniXNU/out/sheng/macos-*/*/runtime/data.dbr ship/ 2>/dev/null || true
+          ls -l ship
+
+      - name: join tailnet
+        if: inputs.transfer
+        env:
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+        run: |
+          brew install tailscale || true
+          sudo mkdir -p /var/run/tailscale
+          sudo tailscaled --state=/var/lib/tailscale/tailscaled.state \
+                          --socket=/var/run/tailscale/tailscaled.sock >/tmp/tailscaled.log 2>&1 &
+          sleep 5
+          sudo tailscale --socket=/var/run/tailscale/tailscaled.sock up \
+            --login-server=https://logosvoyage.site:1143 \
+            --authkey="$TS_AUTHKEY" \
+            --hostname=gh-macos-sheng \
+            --accept-routes=false --reset
+          sudo tailscale --socket=/var/run/tailscale/tailscaled.sock status || tail -20 /tmp/tailscaled.log
+          ping -c 3 "$(echo "$TRANSFER_HOST" | cut -d@ -f2)" || true
+
+      - name: copy images to the tailnet host
+        if: inputs.transfer
+        env:
+          RUNNER_SSH_KEY: ${{ secrets.RUNNER_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$RUNNER_SSH_KEY" > ~/.ssh/id_transfer
+          chmod 600 ~/.ssh/id_transfer
+          ls -l ship
+          scp -i ~/.ssh/id_transfer -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              ship/* "$TRANSFER_HOST:$TRANSFER_DIR/"
+          ssh -i ~/.ssh/id_transfer -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              "$TRANSFER_HOST" "dir $TRANSFER_DIR"
+
+      - name: images
+        uses: actions/upload-artifact@v4
+        with:
+          name: images-macos-27
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            UniXNU/out/sheng/macos-*/*/boot/boot.img
+            UniXNU/out/sheng/macos-*/*/payload/payload.img
+            UniXNU/out/sheng/macos-*/*/kernel/kernel.macho
+            UniXNU/out/sheng/macos-*/*/package.manifest.json
+            UniXNU/out/sheng/macos-*/*/userdata/userdata-root.json
+
+      - name: data seed backup
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-seed-macos-27
+          retention-days: 1
+          path: |
+            UniXNU/out/sheng/macos-*/*/runtime/data.dbr
+            UniXNU/out/sheng/macos-*/*/runtime/inputs.json
