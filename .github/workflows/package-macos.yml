@@ -171,6 +171,16 @@ jobs:
           done
           du -sh device/drivers/*/deps 2>/dev/null || true
 
+      - name: extract proprietary firmware (touch, keyboard, video)
+        working-directory: device
+        run: |
+          # proprietary-files.txt names the closed-source blobs (touch/keyboard/VPU) plus an
+          # @fetch public mirror. extract-files.py pulls each into .cache/firmware/ and checks
+          # its SHA-256; release's stage-video-firmware.py needs qcom/sm8550/sheng/vpu30_4v.mbn.
+          python3 scripts/extract-files.py
+          echo '--- extracted firmware ---'
+          find .cache/firmware -type f 2>/dev/null | sort
+
       - name: release (kernel, package, payload, firmware, boot.img)
         working-directory: device
         env:
