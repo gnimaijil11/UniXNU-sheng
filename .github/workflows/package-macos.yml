@@ -107,16 +107,16 @@ jobs:
         run: |
           set -o pipefail
           python3 ../UniXNU/unixnu build kernel payload --os macos-27 -D . 2>&1 | tee /tmp/seedcmd.log || true
-          cmd="$(tr '\n' ' ' < /tmp/seedcmd.log | grep -o 'python3 scripts/make-macos-data-seed\.py .*--gib [0-9]*' | head -1)"
+          cmd="$(grep -o 'python3 .*make-macos-data-seed\.py .*--gib [0-9]*' /tmp/seedcmd.log | head -1)"
           if [ -z "$cmd" ]; then
             echo '::error::no make-macos-data-seed.py command was printed; showing the tail of the log'
             tail -40 /tmp/seedcmd.log
             exit 1
           fi
+          echo "seed command: $cmd"
           account="${SEED_USER:-${{ secrets.MACOS_SEED_USER }}}"
           account="${account:-unixnu:unixnu}"
           echo "::add-mask::${account#*:}"
-          cd ../UniXNU
           sudo -E bash -c "$cmd --skip-setup --user '$account'"
 
       - name: release (kernel, package, payload, firmware, boot.img)
