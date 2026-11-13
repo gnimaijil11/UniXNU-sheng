@@ -105,13 +105,74 @@ jobs:
           for f in $files; do sed -i '' 's/timeout=1800/timeout=10800/' "$f"; done
           grep -rn 'timeout=10800' UniXNU/out | head -3
 
+      - name: sign the root policies (trusted-key + manifest headers + vroot tables)
+        working-directory: device
+        env:
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+        run: |
+          set -euo pipefail
+          brew install openssl@3 >/dev/null 2>&1 || true
+          mkdir -p build/raw
+          # 1. Extract the three macOS windows (OS, SystemOS cryptex, App cryptex) from the IPSW.
+          OS_DMG=$(python3 ../UniXNU/unixnu ipsw fetch OS --os macos-27 -D .)
+          SYS_DMG=$(python3 ../UniXNU/unixnu ipsw fetch "Cryptex1,SystemOS" --os macos-27 -D .)
+          APP_DMG=$(python3 ../UniXNU/unixnu ipsw fetch "Cryptex1,AppOS" --os macos-27 -D .)
+          echo "OS:       $OS_DMG"
+          echo "SystemOS: $SYS_DMG"
+          echo "App:      $APP_DMG"
+          # 2. Read each disk image's raw bytes (attach read-only, no mount) into a plain file,
+          #    exactly the size hdiutil reports -- the SHA-256 must equal the profile's [root] digest.
+          raw_extract() {
+            python3 - "$1" "$2" <<'PY'
+          import plistlib, re, subprocess, sys
+          dmg, out = sys.argv[1], sys.argv[2]
+          info = plistlib.loads(subprocess.check_output(['hdiutil', 'imageinfo', '-plist', dmg]))
+          size = info['Size Information']['Total Bytes']
+          at = subprocess.check_output(
+              ['hdiutil', 'attach', '-nomount', '-readonly', '-noverify', '-noautofsck', dmg], text=True)
+          dev = re.search(r'(/dev/disk\d+)\s', at).group(1)
+          raw = dev.replace('/dev/disk', '/dev/rdisk')
+          try:
+              with open(raw, 'rb', buffering=0) as src, open(out, 'wb') as dst:
+                  remaining = size
+                  while remaining:
+                      chunk = src.read(min(8 * 1024 * 1024, remaining))
+                      if not chunk:
+                          raise SystemExit('short read from ' + raw)
+                      dst.write(chunk)
+                      remaining -= len(chunk)
+          finally:
+              subprocess.run(['hdiutil', 'detach', dev], capture_output=True)
+          print(f'{out}: {size} bytes')
+          PY
+          }
+          raw_extract "$OS_DMG"  build/raw-OS.img
+          raw_extract "$SYS_DMG" build/raw-SystemOS.img
+          raw_extract "$APP_DMG" build/raw-App.img
+          # 3. Sign every window with one owner key: writes scripts/policies/<profile>/{OS,SystemOS,App}/
+          #    {manifest.header.bin,trusted-key.bin,verification.json} and the hash tables
+          #    ../UniXNU/build/verified-root-*/hashes.bin that become the userdata *.vroot objects.
+          python3 ../UniXNU/scripts/make-root-policies.py \
+            --tree ../UniXNU \
+            --output scripts/policies/macos-27.3-26C5035r \
+            --window "OS=build/raw-OS.img:84581E99-85BE-4957-AC53-2947E887B3E4" \
+            --window "SystemOS=build/raw-SystemOS.img:6678E466-2F88-4C56-9408-DC7361BAA0BA" \
+            --window "App=build/raw-App.img:F2AEA010-C8EB-4AF8-92A9-4B90781CD668"
+          echo "=== policy headers ==="
+          ls -la scripts/policies/macos-27.3-26C5035r/OS scripts/policies/macos-27.3-26C5035r/SystemOS scripts/policies/macos-27.3-26C5035r/App
+          echo "=== vroot hash tables ==="
+          ls -la ../UniXNU/build/verified-root-OS/hashes.bin ../UniXNU/build/verified-root-SystemOS/hashes.bin ../UniXNU/build/verified-root-App/hashes.bin
+
       - name: userdata root image (macos-27)
         working-directory: device
         env:
           UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
         run: |
           python3 ../UniXNU/unixnu build userdata --os macos-27 -D . --dry-run
-          python3 ../UniXNU/unixnu build userdata --os macos-27 -D .
+          python3 ../UniXNU/unixnu build userdata --os macos-27 -D . \
+            --object OS.vroot=../UniXNU/build/verified-root-OS/hashes.bin \
+            --object SystemOS.vroot=../UniXNU/build/verified-root-SystemOS/hashes.bin \
+            --object App.vroot=../UniXNU/build/verified-root-App/hashes.bin
 
       - name: data seed (root, skip-setup)
         working-directory: device
