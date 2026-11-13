@@ -148,12 +148,14 @@ jobs:
       - name: patch the driver fetch scripts
         run: |
           # drivers/*/tools/fetch-sources.py calls `git sparse-checkout add` with the
-          # leading-slash paths from source-lock.json; git 2.5x rejects those.
+          # leading-slash paths from source-lock.json (git 2.5x rejects those) AND in
+          # cone mode (`git clone --sparse` default), which rejects single-file paths.
+          # `set --no-cone` accepts mixed dir/file paths, fixing both at once.
           shopt -s nullglob
           files=(device/drivers/*/tools/fetch-sources.py)
           echo "candidates: ${files[*]}"
           for f in "${files[@]}"; do
-            sed -i '' 's/"sparse-checkout", "add", \*source\["paths"\]/"sparse-checkout", "add", *paths/' "$f"
+            sed -i '' 's/"sparse-checkout", "add", \*source\["paths"\]/"sparse-checkout", "set", "--no-cone", *paths/' "$f"
             grep -n 'sparse-checkout' "$f" || echo "  (no sparse-checkout line in $f)"
           done
 
