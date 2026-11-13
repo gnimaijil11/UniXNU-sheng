@@ -85,6 +85,13 @@ jobs:
             exit 1
           fi
 
+      - name: raise build timeouts in the sources
+        run: |
+          files="$(grep -rl 'timeout=1800' UniXNU/scripts 2>/dev/null || true)"
+          echo "patching sources: $files"
+          for f in $files; do sed -i '' 's/timeout=1800/timeout=10800/' "$f"; done
+          grep -rn 'timeout=10800' UniXNU/scripts | head -3
+
       - name: deps, preflight and patches (macos-27)
         working-directory: device
         env:
@@ -133,7 +140,7 @@ jobs:
         run: |
           seed="$(ls "$(pwd)/../UniXNU"/out/sheng/macos-*/*/runtime/data.dbr | head -1)"
           echo "seed: $seed"
-          scripts/package.sh --os macos-27 --no-deps --uefi ../uefi-sheng --data-ramdisk "$seed"
+          scripts/package.sh --os macos-27 --uefi ../uefi-sheng --data-ramdisk "$seed"
 
       - name: pack userdata for transfer
         run: |
